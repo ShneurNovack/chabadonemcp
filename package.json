@@ -1,0 +1,16 @@
+{
+  "name": "chabadonemcp",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ChabadOne auto-login worker (Cloudflare Browser Rendering). Milestone 1: login prober.",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@cloudflare/puppeteer": "^1.4.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.148.0"
+  }
+}

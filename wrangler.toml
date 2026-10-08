@@ -1,0 +1,12 @@
+name = "chabadonemcp"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare Browser Rendering - lets the worker drive a real Chromium to log in.
+browser = { binding = "BROWSER" }
+
+# Secrets (set in the dashboard or via `wrangler secret put`, never in this file):
+#   CHABADONE_EMAIL
+#   CHABADONE_PASSWORD
+#   BEARER_TOKEN
