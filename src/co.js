@@ -71,10 +71,14 @@ export function installCO() {
     },
     versions(id) { return json(API + "/pages/" + id + "/versions"); },
     async createPage(parentId) {
+      const before = (await this.children(parentId)).map((c) => c.id);
       const { text: t } = await text(PUB + "/EditArticleBody_neweditor.asp?Act=New&AID=" + parentId);
       const m = t.match(/loadNewAppURL\(Number\('(\d+)'\)/);
-      if (!m) throw new Error("CREATE_FAILED");
-      return Number(m[1]);
+      if (m) return Number(m[1]);
+      // Fallback: find the page that just appeared under the parent (avoids orphans).
+      const neu = (await this.children(parentId)).find((c) => !before.includes(c.id));
+      if (neu) return neu.id;
+      throw new Error("CREATE_FAILED");
     },
     async savePage(id, opts) {
       opts = opts || {};

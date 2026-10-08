@@ -67,6 +67,7 @@ async function openSession(browser, env, site) {
     await page.setUserAgent(UA);
     try {
       await page.setCookie(...cached.cookies);
+      await page.setCookie({ name: "sc_version", value: "5.0", url: ORIGIN }); // New Publishing mode
       await page.goto(`${ORIGIN}/platform/sitecontrol/sitecontrol.asp?Sel_MosadID=${encodeURIComponent(site)}`, { waitUntil: "networkidle0", timeout: 60000 });
       if (!/login\.asp/i.test(page.url())) {
         await page.evaluate(installCO);
@@ -79,6 +80,7 @@ async function openSession(browser, env, site) {
   const page = await ctx.newPage();
   await page.setUserAgent(UA);
   await loginForm(page, env);
+  await page.setCookie({ name: "sc_version", value: "5.0", url: ORIGIN }); // New Publishing mode
   await page.goto(`${ORIGIN}/platform/sitecontrol/sitecontrol.asp?Sel_MosadID=${encodeURIComponent(site)}`, { waitUntil: "networkidle0", timeout: 60000 });
   await page.evaluate(installCO);
   return page;
