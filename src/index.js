@@ -63,42 +63,43 @@ function sessionCookies(all) {
 async function writePathTest(env, site) {
   const report = { site, startedAt: new Date().toISOString() };
 
-  // 1. One real login to mint the cookies.
-  const b1 = await puppeteer.launch(env.BROWSER);
-  let cookies;
+  // One browser, two isolated contexts (browser launches are rate-limited).
+  const browser = await puppeteer.launch(env.BROWSER);
   try {
-    const page = await login(b1, env, site);
-    cookies = sessionCookies(await page.cookies(ORIGIN));
-  } finally {
-    await b1.close();
-  }
-  report.injectedCookieNames = cookies.map((c) => c.name);
+    // Context 1 (default): a real login to mint the cookies.
+    const loginPage = await login(browser, env, site);
+    const cookies = sessionCookies(await loginPage.cookies(ORIGIN));
+    await loginPage.close();
+    report.injectedCookieNames = cookies.map((c) => c.name);
 
-  // 2. Brand-new browser. Inject cookies BEFORE navigating. No login form.
-  const b2 = await puppeteer.launch(env.BROWSER);
-  try {
-    const page = await b2.newPage();
-    await page.setUserAgent(UA);
-    await page.setCookie(...cookies);
-    await page.goto(`${ORIGIN}/platform/sitecontrol/sitecontrol.asp?Sel_MosadID=${encodeURIComponent(site)}`, {
-      waitUntil: "networkidle0",
-      timeout: 60000,
-    });
-    report.landedOnLogin = /login\.asp/i.test(page.url());
-    report.probes = await page.evaluate(async () => {
-      const t = async (u) => {
-        try { const r = await fetch(u, { credentials: "include" }); return { status: r.status, len: (await r.text()).length }; }
-        catch (e) { return { err: String(e) }; }
-      };
-      const text = async (u) => { try { return (await (await fetch(u, { credentials: "include" })).text()).trim().slice(0, 60); } catch (e) { return String(e); } };
-      return {
-        activeDomain: await text("/platform/sitecontrol/admin/scripts/session.ajax.asp?action=MosaddomainResponse"),
-        legacy_tree: await t("/platform/global/co_tree/co_navBranch.ajax.asp?Type=A&id=7245483&isajaxcall=true&context=sitecontrol&foldersonly=false"),
-        api_sites: await t("/api/v2/chabadone/sites/sites"),
-      };
-    });
+    // Context 2 (isolated, its own cookie jar): inject cookies, no login form.
+    const ctx = await browser.createBrowserContext();
+    try {
+      const page = await ctx.newPage();
+      await page.setUserAgent(UA);
+      await page.setCookie(...cookies);
+      await page.goto(`${ORIGIN}/platform/sitecontrol/sitecontrol.asp?Sel_MosadID=${encodeURIComponent(site)}`, {
+        waitUntil: "networkidle0",
+        timeout: 60000,
+      });
+      report.landedOnLogin = /login\.asp/i.test(page.url());
+      report.probes = await page.evaluate(async () => {
+        const t = async (u) => {
+          try { const r = await fetch(u, { credentials: "include" }); return { status: r.status, len: (await r.text()).length }; }
+          catch (e) { return { err: String(e) }; }
+        };
+        const text = async (u) => { try { return (await (await fetch(u, { credentials: "include" })).text()).trim().slice(0, 60); } catch (e) { return String(e); } };
+        return {
+          activeDomain: await text("/platform/sitecontrol/admin/scripts/session.ajax.asp?action=MosaddomainResponse"),
+          legacy_tree: await t("/platform/global/co_tree/co_navBranch.ajax.asp?Type=A&id=7245483&isajaxcall=true&context=sitecontrol&foldersonly=false"),
+          api_sites: await t("/api/v2/chabadone/sites/sites"),
+        };
+      });
+    } finally {
+      await ctx.close();
+    }
   } finally {
-    await b2.close();
+    await browser.close();
   }
 
   const p = report.probes || {};
