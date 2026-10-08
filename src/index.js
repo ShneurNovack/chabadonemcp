@@ -34,6 +34,7 @@ export default {
     try {
       if (url.pathname === "/login-test") return json(await loginTest(env, site));
       if (url.pathname === "/cookie-replay-test") return json(await cookieReplayTest(env, site));
+      if (url.pathname === "/write-path-test") return json(await writePathTest(env, site));
     } catch (e) {
       return json({ result: "error", error: String((e && e.stack) || e) }, 500);
     }
@@ -48,6 +49,64 @@ export default {
     });
   },
 };
+
+// Only the ChabadOne auth/session cookies - drop analytics and Cloudflare's
+// per-browser __cf_bm (a fresh browser mints its own by passing the challenge).
+function sessionCookies(all) {
+  return all
+    .filter((c) => !/^_ga|^_gcl|^_pk|^gtm_/.test(c.name) && c.name !== "__cf_bm")
+    .map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path || "/", secure: !!c.secure, httpOnly: !!c.httpOnly }));
+}
+
+// Linchpin test: can a fresh browser with ONLY the injected cookie (no password
+// login) reach the admin, clear Cloudflare, and read a .asp endpoint?
+async function writePathTest(env, site) {
+  const report = { site, startedAt: new Date().toISOString() };
+
+  // 1. One real login to mint the cookies.
+  const b1 = await puppeteer.launch(env.BROWSER);
+  let cookies;
+  try {
+    const page = await login(b1, env, site);
+    cookies = sessionCookies(await page.cookies(ORIGIN));
+  } finally {
+    await b1.close();
+  }
+  report.injectedCookieNames = cookies.map((c) => c.name);
+
+  // 2. Brand-new browser. Inject cookies BEFORE navigating. No login form.
+  const b2 = await puppeteer.launch(env.BROWSER);
+  try {
+    const page = await b2.newPage();
+    await page.setUserAgent(UA);
+    await page.setCookie(...cookies);
+    await page.goto(`${ORIGIN}/platform/sitecontrol/sitecontrol.asp?Sel_MosadID=${encodeURIComponent(site)}`, {
+      waitUntil: "networkidle0",
+      timeout: 60000,
+    });
+    report.landedOnLogin = /login\.asp/i.test(page.url());
+    report.probes = await page.evaluate(async () => {
+      const t = async (u) => {
+        try { const r = await fetch(u, { credentials: "include" }); return { status: r.status, len: (await r.text()).length }; }
+        catch (e) { return { err: String(e) }; }
+      };
+      const text = async (u) => { try { return (await (await fetch(u, { credentials: "include" })).text()).trim().slice(0, 60); } catch (e) { return String(e); } };
+      return {
+        activeDomain: await text("/platform/sitecontrol/admin/scripts/session.ajax.asp?action=MosaddomainResponse"),
+        legacy_tree: await t("/platform/global/co_tree/co_navBranch.ajax.asp?Type=A&id=7245483&isajaxcall=true&context=sitecontrol&foldersonly=false"),
+        api_sites: await t("/api/v2/chabadone/sites/sites"),
+      };
+    });
+  } finally {
+    await b2.close();
+  }
+
+  const p = report.probes || {};
+  report.writePathWorks =
+    report.landedOnLogin === false && p.legacy_tree && p.legacy_tree.status === 200;
+  report.result = "ok";
+  return report;
+}
 
 // Shared: launch, log in from secrets, select the site. Returns the live page.
 async function login(browser, env, site) {
