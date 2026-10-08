@@ -3,10 +3,13 @@ main = "src/index.js"
 compatibility_date = "2025-09-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Cloudflare Browser Rendering - lets the worker drive a real Chromium to log in.
+# Cloudflare Browser Rendering - drives a real Chromium for logins and .asp writes.
 browser = { binding = "BROWSER" }
 
-# Secrets (set in the dashboard or via `wrangler secret put`, never in this file):
-#   CHABADONE_EMAIL
-#   CHABADONE_PASSWORD
-#   BEARER_TOKEN
+# Cookie cache so reads skip the browser and logins are rare.
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "f0bfc88d6db342959c5a5ccc71a733c5"
+
+# Secrets (set in the dashboard / wrangler, never in this file):
+#   CHABADONE_EMAIL, CHABADONE_PASSWORD, BEARER_TOKEN
