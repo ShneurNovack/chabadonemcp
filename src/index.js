@@ -140,6 +140,75 @@ function co(env, site, method, args = []) {
   );
 }
 
+/* ---------------- forms (browser) ---------------- */
+// The ChabadOne Form Builder is a Jotform-derived engine. A form is stored as a
+// flat `properties` map ({qid}_{prop} per field + form_* settings) plus `source`
+// (the rendered HTML the public page serves). Writing a form POSTs both to
+// save.asp, which is Cloudflare-gated, so this runs in the browser. Generation
+// reuses their own BuildSource (loaded natively on edit.aspx), so the HTML is
+// always exactly what the builder produces.
+
+const SAVE_URL = "/net/platform/sitecontrol/admin/publishing/formbuilder/save.asp";
+const editUrl = (aid) => `${ORIGIN}/net/platform/sitecontrol/admin/publishing/formbuilder/edit.aspx?aid=${aid}&lang=en&edit_lang=en&angular=true`;
+const builderReady = () => !!(window.BuildSource && window.default_properties && typeof window.BuildSource.getCode === "function");
+
+// Runs in the edit.aspx page. Expands the field spec against their real
+// default_properties, generates source via their BuildSource, POSTs save.asp.
+// spec: { formId, title?, pagetitle?, thankText?, thankUrl?, emails?[], status?, fields:[{type,text,required?,options?,...}], baseProps? }
+async function fbBuildAndSave(spec) {
+  const dp = window.default_properties;
+  const unwrap = (m) => (m && typeof m === "object" && "value" in m) ? m.value : m;
+  const slug = (label, qid) => {
+    const s = String(label || "").replace(/<[^>]+>/g, " ").replace(/[^A-Za-z0-9 ]/g, " ").trim().split(/\s+/)
+      .map((w, i) => i === 0 ? w.toLowerCase() : (w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join("");
+    return s ? s.slice(0, 40) : ("field" + qid);
+  };
+  const props = {};
+  const base = spec.baseProps;
+  if (base) { for (const k in base) if (k.indexOf("form_") === 0) props[k] = base[k]; }
+  else { for (const k in dp.form) props["form_" + k] = unwrap(dp.form[k]); }
+  if (spec.title != null) { props.form_title = spec.title; props.form_pagetitle = (spec.pagetitle != null) ? spec.pagetitle : spec.title; }
+  if (spec.thankText != null) props.form_thanktext = spec.thankText;
+  if (spec.thankUrl != null) props.form_thankurl = spec.thankUrl;
+  if (spec.emails) props.form_emails = spec.emails.map((e) => ({ email: e, type: "notification" }));
+  if (!props.form_status) props.form_status = spec.status || "Enabled";
+  props.form_id = spec.formId; props.form_slug = props.form_slug || spec.formId;
+  const RES = { type: 1, text: 1, required: 1, options: 1, order: 1, qid: 1, name: 1 };
+  (spec.fields || []).forEach((f, i) => {
+    const qid = f.qid || (i + 1), order = f.order || (i + 1);
+    const b = dp[f.type];
+    if (!b) throw new Error("Unknown control type: " + f.type);
+    for (const k in b) props[qid + "_" + k] = unwrap(b[k]);
+    props[qid + "_type"] = f.type; props[qid + "_qid"] = qid; props[qid + "_order"] = order;
+    props[qid + "_name"] = f.name || slug(f.text, qid);
+    if (f.text != null) props[qid + "_text"] = f.text;
+    if (f.required != null) props[qid + "_required"] = (f.required === true || f.required === "Yes") ? "Yes" : "No";
+    if (f.options) props[qid + "_options"] = Array.isArray(f.options) ? f.options.join("|") : f.options;
+    for (const k in f) if (!RES[k]) props[qid + "_" + k] = f[k];
+  });
+  window.BuildSource.init(props);
+  const source = window.BuildSource.getCode({ type: "css", config: false, pagecode: false });
+  const body = "action=saveForm&formID=" + spec.formId +
+    "&source=" + encodeURIComponent(source) +
+    "&properties=" + encodeURIComponent(JSON.stringify(props));
+  const r = await fetch("/net/platform/sitecontrol/admin/publishing/formbuilder/save.asp", {
+    method: "POST", credentials: "include",
+    headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest" },
+    body,
+  });
+  const txt = await r.text(); let res; try { res = JSON.parse(txt); } catch (e) { res = { raw: txt.slice(0, 200) }; }
+  return { saveStatus: r.status, saved: res, fieldCount: (spec.fields || []).length, sourceBytes: source.length };
+}
+
+// read current form definition (runs in edit.aspx)
+function fbReadForm() {
+  const p = (typeof getAllProperties === "function") ? getAllProperties() : {};
+  const fields = [];
+  for (const k in p) { const m = k.match(/^(\d+)_type$/); if (m) { const q = m[1]; fields.push({ qid: Number(q), type: p[q + "_type"], text: p[q + "_text"], required: p[q + "_required"], order: Number(p[q + "_order"]) || 0, options: p[q + "_options"] }); } }
+  fields.sort((a, b) => a.order - b.order);
+  return { formId: p.form_id, title: p.form_title, status: p.form_status, thankText: p.form_thanktext, emails: p.form_emails, fieldCount: fields.length, fields };
+}
+
 /* ---------------- settings reference (mapped) ---------------- */
 
 const SETTINGS_SECTIONS = [
@@ -214,6 +283,46 @@ const TOOLS = [
     handler: (env, a) => withBrowser(env, site(a), (page) => page.evaluate(async (url, folderId, name) => { if (!folderId) { const roots = await window.CO.roots(); const img = roots.find((r) => r.prefix === "I"); folderId = img && img.id; } const imageId = await window.CO.uploadImageFromUrl(url, folderId, name); return { imageId, folderId }; }, a.url, a.folderId, a.name)) },
   { name: "delete_image", description: "Delete an image by id.", inputSchema: S({ imageId: { type: "number" } }, ["imageId"]),
     handler: (env, a) => co(env, site(a), "deleteImage", [a.imageId]) },
+
+  // ---- form writes (browser; reuses ChabadOne's own BuildSource for exact HTML) ----
+  { name: "create_form", description: "Create a ChabadOne web form (Form Builder) under parentId, generate its exact HTML and save it. Publishes by default (publish:false for a draft). `fields` is an ordered array of {type, text, required?, options?, ...}. Common types: control_head (section heading; use text + optional subHeader), control_text (free HTML block, put HTML in text), control_textbox, control_textarea, control_email, control_phone, control_fullname, control_number, control_datetime, control_address, and control_dropdown / control_radio / control_checkbox (pass options as a string array). A Submit button is added automatically. Omit parentId to place it at the site root.",
+    inputSchema: S({ title: { type: "string" }, parentId: { type: "number" }, fields: { type: "array", items: { type: "object" } }, thankText: { type: "string" }, thankUrl: { type: "string" }, emails: { type: "array", items: { type: "string" } }, publish: { type: "boolean" } }, ["title", "fields"]),
+    handler: (env, a) => withBrowser(env, site(a), async (page) => {
+      const parent = a.parentId || await page.evaluate(async () => { const r = await window.CO.roots(); const my = r.find((x) => x.prefix === "A"); return my && my.id; });
+      await page.goto(`${ORIGIN}/platform/sitecontrol/admin/publishing/EditArticleBody_neweditor.asp?Act=New&FormType=SpecialForm&DocType=Form&language=en&AID=${parent}`, { waitUntil: "networkidle0", timeout: 60000 });
+      const err = await page.evaluate(() => /error\.asp/i.test(location.href) ? (new URLSearchParams(location.search).get("error") || "error") : null);
+      if (err) throw new Error("form_create_failed (" + err + "): site may be at its form limit or the parent is invalid.");
+      await page.waitForFunction(() => !!(window.BuildSource && window.default_properties && typeof window.BuildSource.getCode === "function"), { timeout: 30000 });
+      const aid = await page.evaluate(() => window.formID || (window.form && window.form.getProperty && window.form.getProperty("id")));
+      const saved = await page.evaluate(fbBuildAndSave, { formId: aid, title: a.title, pagetitle: a.title, fields: a.fields, thankText: a.thankText, thankUrl: a.thankUrl, emails: a.emails });
+      let published = false;
+      if (a.publish !== false) {
+        try {
+          await page.goto(`${ORIGIN}/platform/sitecontrol/sitecontrol.asp?Sel_MosadID=${encodeURIComponent(site(a))}`, { waitUntil: "networkidle0", timeout: 60000 });
+          await page.evaluate(installCO);
+          await page.evaluate((id) => window.CO.publishPage(Number(id), {}), aid);
+          published = true;
+        } catch (e) { published = "publish_failed: " + String((e && e.message) || e); }
+      }
+      return { formId: Number(aid), parentId: Number(parent), published, ...saved };
+    }) },
+  { name: "update_form", description: "Replace a form's fields and settings, regenerate its HTML, and save. Pass the full ordered `fields` list (it replaces all fields). Existing form settings (notification emails, thank-you, etc.) are preserved unless you pass new values. Stays published if it already was.",
+    inputSchema: S({ formId: { type: "number" }, title: { type: "string" }, fields: { type: "array", items: { type: "object" } }, thankText: { type: "string" }, thankUrl: { type: "string" }, emails: { type: "array", items: { type: "string" } } }, ["formId", "fields"]),
+    handler: (env, a) => withBrowser(env, site(a), async (page) => {
+      await page.goto(editUrl(a.formId), { waitUntil: "networkidle0", timeout: 60000 });
+      await page.waitForFunction(() => !!(window.BuildSource && window.default_properties && typeof window.BuildSource.getCode === "function"), { timeout: 30000 });
+      const base = await page.evaluate(() => (typeof getAllProperties === "function") ? getAllProperties() : null);
+      const saved = await page.evaluate(fbBuildAndSave, { formId: a.formId, title: a.title, pagetitle: a.title, fields: a.fields, thankText: a.thankText, thankUrl: a.thankUrl, emails: a.emails, baseProps: base });
+      return { formId: Number(a.formId), ...saved };
+    }) },
+  { name: "get_form", description: "Read a form's current fields and settings (title, status, notification emails, and each field's type/label/required/options).", inputSchema: S({ formId: { type: "number" } }, ["formId"]),
+    handler: (env, a) => withBrowser(env, site(a), async (page) => {
+      await page.goto(editUrl(a.formId), { waitUntil: "networkidle0", timeout: 60000 });
+      await page.waitForFunction(() => !!(window.BuildSource && window.default_properties), { timeout: 30000 });
+      return page.evaluate(fbReadForm);
+    }) },
+  { name: "delete_form", description: "Delete a form and its page (permanent). Pass parentId to verify removal.", inputSchema: S({ formId: { type: "number" }, parentId: { type: "number" } }, ["formId"]),
+    handler: (env, a) => co(env, site(a), "deletePage", [a.formId, a.parentId]) },
 
   // ---- calendar (browser) ----
   { name: "list_events", description: "List calendar events starting from a date (M/D/YYYY).", inputSchema: S({ date: { type: "string" } }, ["date"]),
