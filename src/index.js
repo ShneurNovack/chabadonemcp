@@ -186,6 +186,26 @@ async function fbBuildAndSave(spec) {
     if (f.options) props[qid + "_options"] = Array.isArray(f.options) ? f.options.join("|") : f.options;
     for (const k in f) if (!RES[k]) props[qid + "_" + k] = f[k];
   });
+  // conditional show/hide logic -> form_conditions (fields referenced by qid, or by a field's ref/name/text)
+  if (spec.conditions && spec.conditions.length) {
+    const fields = spec.fields || [];
+    const resolve = (ref) => {
+      if (ref == null) return null;
+      if (typeof ref === "number") return String(ref);
+      const i = fields.findIndex((x, idx) => (x.ref && x.ref === ref) || x.name === ref || x.text === ref || String(x.qid || (idx + 1)) === String(ref));
+      return i >= 0 ? String(fields[i].qid || (i + 1)) : String(ref);
+    };
+    const OPS = { equals: 1, notEquals: 1, isFilled: 1, isEmpty: 1, greaterThan: 1, lessThan: 1 };
+    const conds = spec.conditions.map((c) => {
+      const terms = (c.when || c.terms || []).map((t) => {
+        const op = t.operator || "equals";
+        return { field: resolve(t.field), operator: op, value: (op === "isFilled" || op === "isEmpty") ? false : (t.value != null ? t.value : "") };
+      }).filter((t) => t.field && OPS[t.operator]);
+      const actions = (c.then || c.actions || []).map((a) => ({ field: resolve(a.field), visibility: String(a.visibility || a.action || "show").toLowerCase() === "hide" ? "Hide" : "Show" })).filter((a) => a.field);
+      return { type: "field", link: String(c.link || "any").toLowerCase() === "all" ? "All" : "Any", terms, actions };
+    }).filter((c) => c.terms.length && c.actions.length);
+    props.form_conditions = conds;
+  }
   window.BuildSource.init(props);
   const source = window.BuildSource.getCode({ type: "css", config: false, pagecode: false });
   const body = "action=saveForm&formID=" + spec.formId +
@@ -206,7 +226,7 @@ function fbReadForm() {
   const fields = [];
   for (const k in p) { const m = k.match(/^(\d+)_type$/); if (m) { const q = m[1]; fields.push({ qid: Number(q), type: p[q + "_type"], text: p[q + "_text"], required: p[q + "_required"], order: Number(p[q + "_order"]) || 0, options: p[q + "_options"] }); } }
   fields.sort((a, b) => a.order - b.order);
-  return { formId: p.form_id, title: p.form_title, status: p.form_status, thankText: p.form_thanktext, emails: p.form_emails, fieldCount: fields.length, fields };
+  return { formId: p.form_id, title: p.form_title, status: p.form_status, thankText: p.form_thanktext, emails: p.form_emails, fieldCount: fields.length, fields, conditions: p.form_conditions || [] };
 }
 
 /* ---------------- settings reference (mapped) ---------------- */
@@ -286,7 +306,7 @@ const TOOLS = [
 
   // ---- form writes (browser; reuses ChabadOne's own BuildSource for exact HTML) ----
   { name: "create_form", description: "Create a ChabadOne web form (Form Builder) under parentId, generate its exact HTML and save it. Publishes by default (publish:false for a draft). `fields` is an ordered array of {type, text, required?, options?, ...}. Common types: control_head (section heading; use text + optional subHeader), control_text (free HTML block, put HTML in text), control_textbox, control_textarea, control_email, control_phone, control_fullname, control_number, control_datetime, control_address, and control_dropdown / control_radio / control_checkbox (pass options as a string array). A Submit button is added automatically. Omit parentId to place it at the site root.",
-    inputSchema: S({ title: { type: "string" }, parentId: { type: "number" }, fields: { type: "array", items: { type: "object" } }, thankText: { type: "string" }, thankUrl: { type: "string" }, emails: { type: "array", items: { type: "string" } }, publish: { type: "boolean" } }, ["title", "fields"]),
+    inputSchema: S({ title: { type: "string" }, parentId: { type: "number" }, fields: { type: "array", items: { type: "object" } }, conditions: { type: "array", items: { type: "object" }, description: "Optional show/hide logic. Each: { link:'any'|'all', when:[{field, operator, value}], then:[{field, action:'show'|'hide'}] }. `field` references a field by its 1-based position, or by a field's name/text/ref. operator: equals, notEquals, isFilled, isEmpty, greaterThan, lessThan (isFilled/isEmpty need no value; greaterThan/lessThan are for numeric/amount fields). A Show target starts hidden and appears when the condition is met; a Hide target starts visible and hides when met." }, thankText: { type: "string" }, thankUrl: { type: "string" }, emails: { type: "array", items: { type: "string" } }, publish: { type: "boolean" } }, ["title", "fields"]),
     handler: (env, a) => withBrowser(env, site(a), async (page) => {
       const parent = a.parentId || await page.evaluate(async () => { const r = await window.CO.roots(); const my = r.find((x) => x.prefix === "A"); return my && my.id; });
       await page.goto(`${ORIGIN}/platform/sitecontrol/admin/publishing/EditArticleBody_neweditor.asp?Act=New&FormType=SpecialForm&DocType=Form&language=en&AID=${parent}`, { waitUntil: "networkidle0", timeout: 60000 });
@@ -294,7 +314,7 @@ const TOOLS = [
       if (err) throw new Error("form_create_failed (" + err + "): site may be at its form limit or the parent is invalid.");
       await page.waitForFunction(() => !!(window.BuildSource && window.default_properties && typeof window.BuildSource.getCode === "function"), { timeout: 30000 });
       const aid = await page.evaluate(() => window.formID || (window.form && window.form.getProperty && window.form.getProperty("id")));
-      const saved = await page.evaluate(fbBuildAndSave, { formId: aid, title: a.title, pagetitle: a.title, fields: a.fields, thankText: a.thankText, thankUrl: a.thankUrl, emails: a.emails });
+      const saved = await page.evaluate(fbBuildAndSave, { formId: aid, title: a.title, pagetitle: a.title, fields: a.fields, conditions: a.conditions, thankText: a.thankText, thankUrl: a.thankUrl, emails: a.emails });
       let published = false;
       if (a.publish !== false) {
         try {
@@ -307,12 +327,12 @@ const TOOLS = [
       return { formId: Number(aid), parentId: Number(parent), published, ...saved };
     }) },
   { name: "update_form", description: "Replace a form's fields and settings, regenerate its HTML, and save. Pass the full ordered `fields` list (it replaces all fields). Existing form settings (notification emails, thank-you, etc.) are preserved unless you pass new values. Stays published if it already was.",
-    inputSchema: S({ formId: { type: "number" }, title: { type: "string" }, fields: { type: "array", items: { type: "object" } }, thankText: { type: "string" }, thankUrl: { type: "string" }, emails: { type: "array", items: { type: "string" } } }, ["formId", "fields"]),
+    inputSchema: S({ formId: { type: "number" }, title: { type: "string" }, fields: { type: "array", items: { type: "object" } }, conditions: { type: "array", items: { type: "object" }, description: "Show/hide logic (same shape as create_form). Pass it whenever you pass fields, since it is rebuilt against the new field order. Omit to keep the form's existing conditions." }, thankText: { type: "string" }, thankUrl: { type: "string" }, emails: { type: "array", items: { type: "string" } } }, ["formId", "fields"]),
     handler: (env, a) => withBrowser(env, site(a), async (page) => {
       await page.goto(editUrl(a.formId), { waitUntil: "networkidle0", timeout: 60000 });
       await page.waitForFunction(() => !!(window.BuildSource && window.default_properties && typeof window.BuildSource.getCode === "function"), { timeout: 30000 });
       const base = await page.evaluate(() => (typeof getAllProperties === "function") ? getAllProperties() : null);
-      const saved = await page.evaluate(fbBuildAndSave, { formId: a.formId, title: a.title, pagetitle: a.title, fields: a.fields, thankText: a.thankText, thankUrl: a.thankUrl, emails: a.emails, baseProps: base });
+      const saved = await page.evaluate(fbBuildAndSave, { formId: a.formId, title: a.title, pagetitle: a.title, fields: a.fields, conditions: a.conditions, thankText: a.thankText, thankUrl: a.thankUrl, emails: a.emails, baseProps: base });
       return { formId: Number(a.formId), ...saved };
     }) },
   { name: "get_form", description: "Read a form's current fields and settings (title, status, notification emails, and each field's type/label/required/options).", inputSchema: S({ formId: { type: "number" } }, ["formId"]),
